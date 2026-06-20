@@ -112,10 +112,10 @@ func (w *endpointWeightState) RecordLatency(latency time.Duration, success bool)
 
 	if success {
 		w.consecutiveFailures = 0
-		if w.removed && time.Now().After(w.nextRetryAt) {
+		if w.removed {
 			w.removed = false
 			w.backoffSeconds = w.baseBackoff
-			klog.V(2).Infof("[adaptive-weight] endpoint %s recovered from removal", w.endpoint)
+			klog.V(2).Infof("[adaptive-weight] endpoint %s fully recovered after successful request", w.endpoint)
 			metrics.RecordUpstreamRecovered(w.endpoint, w.endpoint)
 		}
 	} else {
@@ -124,8 +124,8 @@ func (w *endpointWeightState) RecordLatency(latency time.Duration, success bool)
 			w.removed = true
 			w.removedAt = time.Now()
 			w.nextRetryAt = time.Now().Add(time.Duration(w.backoffSeconds) * time.Second)
-			klog.Warningf("[adaptive-weight] endpoint %s removed due to %d consecutive failures, backoff %ds",
-				w.endpoint, w.consecutiveFailures, w.backoffSeconds)
+			klog.Warningf("[adaptive-weight] endpoint %s removed due to %d consecutive failures, backoff %ds, next retry at %v",
+				w.endpoint, w.consecutiveFailures, w.backoffSeconds, w.nextRetryAt)
 			metrics.RecordUpstreamRemoved(w.endpoint, w.endpoint, "consecutive_failures")
 		}
 	}
@@ -181,14 +181,7 @@ func (w *endpointWeightState) AdjustWeight(minWeight, maxWeight int32, avgP99 ti
 	defer w.mu.Unlock()
 
 	if w.removed {
-		if time.Now().After(w.nextRetryAt) {
-			w.removed = false
-			w.backoffSeconds = w.baseBackoff
-			klog.V(2).Infof("[adaptive-weight] endpoint %s re-added after backoff", w.endpoint)
-			metrics.RecordUpstreamRecovered(w.endpoint, w.endpoint)
-		} else {
-			return
-		}
+		return
 	}
 
 	p99 := w.p99LatencyLocked()
@@ -372,6 +365,7 @@ func (m *adaptiveWeightManager) Start(interval time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
+				m.checkBackoffRestore()
 				m.AdjustWeights()
 				m.reportMetrics()
 			case <-m.ctx.Done():
@@ -379,6 +373,19 @@ func (m *adaptiveWeightManager) Start(interval time.Duration) {
 			}
 		}
 	}()
+}
+
+func (m *adaptiveWeightManager) checkBackoffRestore() {
+	m.mu.RLock()
+	weightStates := make([]*endpointWeightState, 0, len(m.weights))
+	for _, ws := range m.weights {
+		weightStates = append(weightStates, ws)
+	}
+	m.mu.RUnlock()
+
+	for _, ws := range weightStates {
+		ws.TryRestoreAfterBackoff()
+	}
 }
 
 func (m *adaptiveWeightManager) Stop() {

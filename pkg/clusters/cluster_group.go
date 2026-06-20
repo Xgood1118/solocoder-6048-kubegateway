@@ -94,20 +94,24 @@ func (m *ClusterGroupManager) AddClusterGroup(config proxyv1alpha1.ClusterGroupC
 			VirtualEndpoint: config.VirtualEndpoint,
 			LabelSelector:   config.LabelSelector,
 			PrimaryCluster:  config.PrimaryCluster,
-			BackupClusters:  config.BackupClusters,
+			BackupClusters:  append([]string(nil), config.BackupClusters...),
 			AutoFailover:    config.AutoFailover,
 			backupReady:     make(map[string]bool),
 		}
 		m.groups[config.GroupName] = group
 		m.virtualToGroup[config.VirtualEndpoint] = group
 	} else {
+		group.mu.Lock()
 		group.LabelSelector = config.LabelSelector
 		group.PrimaryCluster = config.PrimaryCluster
-		group.BackupClusters = config.BackupClusters
+		group.BackupClusters = append([]string(nil), config.BackupClusters...)
 		group.AutoFailover = config.AutoFailover
+		group.mu.Unlock()
 	}
 
-	m.updateClusterStatus(group)
+	group.mu.Lock()
+	m.updateClusterStatusLocked(group)
+	group.mu.Unlock()
 }
 
 func (m *ClusterGroupManager) RemoveClusterGroup(groupName string) {
@@ -121,7 +125,7 @@ func (m *ClusterGroupManager) RemoveClusterGroup(groupName string) {
 	}
 }
 
-func (m *ClusterGroupManager) updateClusterStatus(group *ClusterGroup) {
+func (m *ClusterGroupManager) updateClusterStatusLocked(group *ClusterGroup) {
 	if len(group.PrimaryCluster) > 0 {
 		cluster, ok := m.clusterManager.Get(group.PrimaryCluster)
 		if ok {
@@ -161,29 +165,27 @@ func (m *ClusterGroupManager) GetGroupByVirtualEndpoint(virtualEndpoint string) 
 }
 
 func (m *ClusterGroupManager) SelectTargetCluster(group *ClusterGroup, namespace string) (*ClusterInfo, string, error) {
+	m.mu.RLock()
+	provider := m.nsLabelProvider
+	m.mu.RUnlock()
+
 	group.mu.RLock()
 	defer group.mu.RUnlock()
 
-	if len(group.LabelSelector) > 0 && len(namespace) > 0 {
+	if len(group.LabelSelector) > 0 && len(namespace) > 0 && provider != nil {
 		selector, err := labels.Parse(group.LabelSelector)
 		if err != nil {
 			klog.Warningf("[cluster-group] failed to parse label selector %q: %v", group.LabelSelector, err)
 		} else {
-			m.mu.RLock()
-			provider := m.nsLabelProvider
-			m.mu.RUnlock()
-
-			if provider != nil {
-				nsLabels, err := provider.GetNamespaceLabels(namespace)
-				if err == nil {
-					if !selector.Matches(labels.Set(nsLabels)) {
-						klog.V(3).Infof("[cluster-group] namespace %q labels do not match selector %q for group %q, trying backups",
-							namespace, group.LabelSelector, group.GroupName)
-						return m.selectBackupCluster(group)
-					}
-				} else {
-					klog.Warningf("[cluster-group] failed to get labels for namespace %q: %v", namespace, err)
+			nsLabels, err := provider.GetNamespaceLabels(namespace)
+			if err == nil {
+				if !selector.Matches(labels.Set(nsLabels)) {
+					klog.V(3).Infof("[cluster-group] namespace %q labels do not match selector %q for group %q, trying backups",
+						namespace, group.LabelSelector, group.GroupName)
+					return m.selectBackupClusterLocked(group)
 				}
+			} else {
+				klog.Warningf("[cluster-group] failed to get labels for namespace %q: %v", namespace, err)
 			}
 		}
 	}
@@ -197,10 +199,10 @@ func (m *ClusterGroupManager) SelectTargetCluster(group *ClusterGroup, namespace
 		}
 	}
 
-	return m.selectBackupCluster(group)
+	return m.selectBackupClusterLocked(group)
 }
 
-func (m *ClusterGroupManager) selectBackupCluster(group *ClusterGroup) (*ClusterInfo, string, error) {
+func (m *ClusterGroupManager) selectBackupClusterLocked(group *ClusterGroup) (*ClusterInfo, string, error) {
 	for _, backup := range group.BackupClusters {
 		if ready, ok := group.backupReady[backup]; ok && ready {
 			cluster, ok := m.clusterManager.Get(backup)
@@ -264,11 +266,15 @@ func (m *ClusterGroupManager) StartHealthCheck(interval time.Duration) {
 
 func (m *ClusterGroupManager) checkAllGroups() {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
+	groups := make([]*ClusterGroup, 0, len(m.groups))
 	for _, group := range m.groups {
+		groups = append(groups, group)
+	}
+	m.mu.RUnlock()
+
+	for _, group := range groups {
 		group.mu.Lock()
-		m.updateClusterStatus(group)
+		m.updateClusterStatusLocked(group)
 		group.mu.Unlock()
 	}
 }
@@ -305,7 +311,7 @@ func (m *ClusterGroupManager) addGroupInternal(config proxyv1alpha1.ClusterGroup
 			VirtualEndpoint: config.VirtualEndpoint,
 			LabelSelector:   config.LabelSelector,
 			PrimaryCluster:  config.PrimaryCluster,
-			BackupClusters:  config.BackupClusters,
+			BackupClusters:  append([]string(nil), config.BackupClusters...),
 			AutoFailover:    config.AutoFailover,
 			backupReady:     make(map[string]bool),
 		}
@@ -313,5 +319,7 @@ func (m *ClusterGroupManager) addGroupInternal(config proxyv1alpha1.ClusterGroup
 		m.virtualToGroup[config.VirtualEndpoint] = group
 	}
 
-	m.updateClusterStatus(group)
+	group.mu.Lock()
+	m.updateClusterStatusLocked(group)
+	group.mu.Unlock()
 }
