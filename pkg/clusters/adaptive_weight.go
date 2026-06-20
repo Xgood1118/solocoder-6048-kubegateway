@@ -112,12 +112,6 @@ func (w *endpointWeightState) RecordLatency(latency time.Duration, success bool)
 
 	if success {
 		w.consecutiveFailures = 0
-		if w.removed {
-			w.removed = false
-			w.backoffSeconds = w.baseBackoff
-			klog.V(2).Infof("[adaptive-weight] endpoint %s fully recovered after successful request", w.endpoint)
-			metrics.RecordUpstreamRecovered(w.endpoint, w.endpoint)
-		}
 	} else {
 		w.consecutiveFailures++
 		if w.consecutiveFailures >= w.failureThreshold && !w.removed {
@@ -184,6 +178,11 @@ func (w *endpointWeightState) AdjustWeight(minWeight, maxWeight int32, avgP99 ti
 		return
 	}
 
+	if w.consecutiveFailures == 0 && w.backoffSeconds != w.baseBackoff {
+		w.backoffSeconds = w.baseBackoff
+		klog.V(3).Infof("[adaptive-weight] endpoint %s backoff reset to base %ds after confirmed healthy", w.endpoint, w.baseBackoff)
+	}
+
 	p99 := w.p99LatencyLocked()
 	if p99 == 0 {
 		return
@@ -218,18 +217,23 @@ func (w *endpointWeightState) TryRestoreAfterBackoff() bool {
 		return false
 	}
 
-	if time.Now().After(w.nextRetryAt) {
-		w.removed = false
-		w.backoffSeconds *= 2
-		if w.backoffSeconds > w.maxBackoff {
-			w.backoffSeconds = w.maxBackoff
-		}
-		w.nextRetryAt = time.Now().Add(time.Duration(w.backoffSeconds) * time.Second)
-		w.consecutiveFailures = 0
-		klog.V(2).Infof("[adaptive-weight] endpoint %s retry after backoff, next retry at %v", w.endpoint, w.nextRetryAt)
-		return true
+	if !time.Now().After(w.nextRetryAt) {
+		return false
 	}
-	return false
+
+	w.removed = false
+	w.consecutiveFailures = 0
+	w.nextRetryAt = time.Now().Add(time.Duration(w.backoffSeconds) * time.Second)
+	klog.V(2).Infof("[adaptive-weight] endpoint %s tentatively restored after backoff, if it fails again next retry in %ds",
+		w.endpoint, w.backoffSeconds)
+	metrics.RecordUpstreamRecovered(w.endpoint, w.endpoint)
+
+	w.backoffSeconds *= 2
+	if w.backoffSeconds > w.maxBackoff {
+		w.backoffSeconds = w.maxBackoff
+	}
+
+	return true
 }
 
 type adaptiveWeightManager struct {

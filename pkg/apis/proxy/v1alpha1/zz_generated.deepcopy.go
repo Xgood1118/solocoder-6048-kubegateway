@@ -622,6 +622,11 @@ func (in *SecureServing) DeepCopyInto(out *SecureServing) {
 		*out = make([]byte, len(*in))
 		copy(*out, *in)
 	}
+	if in.ServerNames != nil {
+		in, out := &in.ServerNames, &out.ServerNames
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	return
 }
 

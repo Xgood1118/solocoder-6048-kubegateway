@@ -193,8 +193,14 @@ func (m *ClusterGroupManager) SelectTargetCluster(group *ClusterGroup, namespace
 	if group.primaryReady || !group.AutoFailover {
 		if len(group.PrimaryCluster) > 0 {
 			cluster, ok := m.clusterManager.Get(group.PrimaryCluster)
-			if ok {
+			if ok && m.isClusterReady(cluster) {
 				return cluster, group.PrimaryCluster, nil
+			}
+			if !group.AutoFailover {
+				if ok {
+					return cluster, group.PrimaryCluster, nil
+				}
+				return nil, "", fmt.Errorf("primary cluster %q not available in group %q", group.PrimaryCluster, group.GroupName)
 			}
 		}
 	}
@@ -204,22 +210,10 @@ func (m *ClusterGroupManager) SelectTargetCluster(group *ClusterGroup, namespace
 
 func (m *ClusterGroupManager) selectBackupClusterLocked(group *ClusterGroup) (*ClusterInfo, string, error) {
 	for _, backup := range group.BackupClusters {
-		if ready, ok := group.backupReady[backup]; ok && ready {
-			cluster, ok := m.clusterManager.Get(backup)
-			if ok {
-				klog.V(2).Infof("[cluster-group] failover to backup cluster %q for group %q", backup, group.GroupName)
-				return cluster, backup, nil
-			}
-		}
-	}
-
-	for _, backup := range group.BackupClusters {
 		cluster, ok := m.clusterManager.Get(backup)
-		if ok {
-			if m.isAnyEndpointReady(cluster) {
-				klog.V(2).Infof("[cluster-group] using backup cluster %q (status check) for group %q", backup, group.GroupName)
-				return cluster, backup, nil
-			}
+		if ok && m.isClusterReady(cluster) {
+			klog.V(2).Infof("[cluster-group] failover to backup cluster %q for group %q", backup, group.GroupName)
+			return cluster, backup, nil
 		}
 	}
 
@@ -231,17 +225,6 @@ func (m *ClusterGroupManager) selectBackupClusterLocked(group *ClusterGroup) (*C
 	}
 
 	return nil, "", fmt.Errorf("no available cluster in group %q", group.GroupName)
-}
-
-func (m *ClusterGroupManager) isAnyEndpointReady(cluster *ClusterInfo) bool {
-	endpoints := cluster.AllEndpoints()
-	for _, ep := range endpoints {
-		info, ok := cluster.Endpoints.Load(ep)
-		if ok && info.IsReady() && !cluster.IsEndpointRemoved(ep) {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *ClusterGroupManager) RecordRouting(virtualEndpoint, targetCluster string) {
