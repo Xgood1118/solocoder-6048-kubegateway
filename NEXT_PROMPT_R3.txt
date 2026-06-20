@@ -1,0 +1,2 @@
+1. 自适应权重的指数退避又被卸掉了——`TryRestoreAfterBackoff` 里翻了倍，`AdjustWeight` 在同一 tick 马上又把它重置回初始值，退避间距始终不涨，摘了接、接了摘间隔都一样。
+检查修复一下。
