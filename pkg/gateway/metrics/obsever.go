@@ -35,6 +35,14 @@ var (
 	ProxyRequestDataSizeObservers      = newUnionObserver()
 
 	ProxyHandlingLatencyObservers = newUnionObserver()
+
+	ProxyUpstreamWeightObservers    = newUnionObserver()
+	ProxyUpstreamRemovedObservers   = newUnionObserver()
+	ProxyUpstreamRecoveredObservers = newUnionObserver()
+
+	ProxyPriorityQueueWaitObservers = newUnionObserver()
+
+	ProxyClusterGroupRoutingObservers = newUnionObserver()
 )
 
 type MetricInfo struct {
@@ -64,6 +72,12 @@ type MetricInfo struct {
 	Result      string
 	LimitMethod string
 	Type        string
+
+	Weight        float64
+	WaitLatency   float64
+	Priority      string
+	VirtualEndpoint string
+	TargetCluster string
 }
 
 func newUnionObserver() UnionObserver {

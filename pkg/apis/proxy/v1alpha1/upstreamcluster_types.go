@@ -26,34 +26,23 @@ const (
 
 // UpstreamClusterSpec defines the desired state of UpstreamCluster
 type UpstreamClusterSpec struct {
-	// Servers contains a group of upstream api servers
 	Servers []UpstreamClusterServer `json:"servers,omitempty" protobuf:"bytes,1,rep,name=servers"`
 
-	// Client connection config for upstream api servers
 	ClientConfig ClientConfig `json:"clientConfig,omitempty" protobuf:"bytes,2,opt,name=clientConfig"`
 
-	// Secures serving config for upstream cluster
 	SecureServing SecureServing `json:"secureServing,omitempty" protobuf:"bytes,3,opt,name=secureServing"`
 
-	// Client flow control settings, e.g. qps and burst
 	FlowControl FlowControl `json:"flowControl,omitempty" protobuf:"bytes,4,opt,name=flowControl"`
 
-	// DispatchPolicies describes how to dispatch requests to upsteams.
-	// Only one dispatch policy will be matched
-	// The router will follow the order of DispatchPolicies, that means
-	// the previous policy has higher priority
 	DispatchPolicies []DispatchPolicy `json:"dispatchPolicies,omitempty" protobuf:"bytes,5,rep,name=dispatchPolicies"`
 
-	// Logging config for upstream cluster
-	//
-	// There are three places to control the log switch
-	// 1. flag --enable-proxy-access-log: If it is false, all proxy access log
-	//    will be disabled.
-	// 2. log mode in upstream, it allows you control cluster level log switch. If it
-	//    is off, all access logs of requests to this cluster will be disabled.
-	// 3. log mode in dispatchPolicy, it allows you control policy level log switch.
-	//    If it is off, all access logs of requests matching this policy will be disabled.
 	Logging LoggingConfig `json:"logging,omitempty" protobuf:"bytes,6,opt,name=logging"`
+
+	AdaptiveWeight AdaptiveWeightConfig `json:"adaptiveWeight,omitempty" protobuf:"bytes,7,opt,name=adaptiveWeight"`
+
+	PriorityQueue PriorityQueueConfig `json:"priorityQueue,omitempty" protobuf:"bytes,8,opt,name=priorityQueue"`
+
+	ClusterGroup ClusterGroupConfig `json:"clusterGroup,omitempty" protobuf:"bytes,9,opt,name=clusterGroup"`
 }
 
 type LogMode string
@@ -217,6 +206,10 @@ type UpstreamClusterServer struct {
 	// Disabled marks the server as permanently unavailable.
 	// +optional
 	Disabled *bool `json:"disabled,omitempty" protobuf:"varint,2,opt,name=disabled"`
+	// Weight is the base weight for this endpoint in weighted round robin load balancing.
+	// If not set, defaults to 10.
+	// +optional
+	Weight *int32 `json:"weight,omitempty" protobuf:"varint,3,opt,name=weight"`
 }
 
 type DispatchPolicy struct {
@@ -251,8 +244,69 @@ type DispatchPolicy struct {
 type Strategy string
 
 const (
-	RoundRobin Strategy = "RoundRobin"
+	RoundRobin         Strategy = "RoundRobin"
+	WeightedRoundRobin Strategy = "WeightedRoundRobin"
 )
+
+type AdaptiveWeightConfig struct {
+	Enabled bool `json:"enabled,omitempty" protobuf:"varint,1,opt,name=enabled"`
+
+	WindowSize int32 `json:"windowSize,omitempty" protobuf:"varint,2,opt,name=windowSize"`
+
+	MinWeight int32 `json:"minWeight,omitempty" protobuf:"varint,3,opt,name=minWeight"`
+
+	MaxWeight int32 `json:"maxWeight,omitempty" protobuf:"varint,4,opt,name=maxWeight"`
+
+	AdjustIntervalSeconds int32 `json:"adjustIntervalSeconds,omitempty" protobuf:"varint,5,opt,name=adjustIntervalSeconds"`
+
+	FailureThreshold int32 `json:"failureThreshold,omitempty" protobuf:"varint,6,opt,name=failureThreshold"`
+
+	BaseBackoffSeconds int32 `json:"baseBackoffSeconds,omitempty" protobuf:"varint,7,opt,name=baseBackoffSeconds"`
+
+	MaxBackoffSeconds int32 `json:"maxBackoffSeconds,omitempty" protobuf:"varint,8,opt,name=maxBackoffSeconds"`
+}
+
+type PriorityQueueConfig struct {
+	Enabled bool `json:"enabled,omitempty" protobuf:"varint,1,opt,name=enabled"`
+
+	MaxQueueSize int32 `json:"maxQueueSize,omitempty" protobuf:"varint,2,opt,name=maxQueueSize"`
+
+	MaxWaitSeconds int32 `json:"maxWaitSeconds,omitempty" protobuf:"varint,3,opt,name=maxWaitSeconds"`
+
+	PriorityRules []PriorityRule `json:"priorityRules,omitempty" protobuf:"bytes,4,rep,name=priorityRules"`
+
+	DefaultPriority int32 `json:"defaultPriority,omitempty" protobuf:"varint,5,opt,name=defaultPriority"`
+
+	EnableDegradedResponse bool `json:"enableDegradedResponse,omitempty" protobuf:"varint,6,opt,name=enableDegradedResponse"`
+
+	DegradedPriorityThreshold int32 `json:"degradedPriorityThreshold,omitempty" protobuf:"varint,7,opt,name=degradedPriorityThreshold"`
+}
+
+type PriorityRule struct {
+	Priority int32 `json:"priority,omitempty" protobuf:"varint,1,opt,name=priority"`
+
+	Verbs []string `json:"verbs,omitempty" protobuf:"bytes,2,rep,name=verbs"`
+
+	APIGroups []string `json:"apiGroups,omitempty" protobuf:"bytes,3,rep,name=apiGroups"`
+
+	Resources []string `json:"resources,omitempty" protobuf:"bytes,4,rep,name=resources"`
+}
+
+type ClusterGroupConfig struct {
+	Enabled bool `json:"enabled,omitempty" protobuf:"varint,1,opt,name=enabled"`
+
+	GroupName string `json:"groupName,omitempty" protobuf:"bytes,2,opt,name=groupName"`
+
+	VirtualEndpoint string `json:"virtualEndpoint,omitempty" protobuf:"bytes,3,opt,name=virtualEndpoint"`
+
+	LabelSelector string `json:"labelSelector,omitempty" protobuf:"bytes,4,opt,name=labelSelector"`
+
+	PrimaryCluster string `json:"primaryCluster,omitempty" protobuf:"bytes,5,opt,name=primaryCluster"`
+
+	BackupClusters []string `json:"backupClusters,omitempty" protobuf:"bytes,6,rep,name=backupClusters"`
+
+	AutoFailover bool `json:"autoFailover,omitempty" protobuf:"varint,7,opt,name=autoFailover"`
+}
 
 // DispatchPolicyRule holds information that describes a policy rule
 type DispatchPolicyRule struct {

@@ -15,6 +15,7 @@
 package clusters
 
 import (
+	"context"
 	"strings"
 	"sync"
 
@@ -36,13 +37,17 @@ type Manager interface {
 	DeleteWithStop(name string)
 	DeleteAll()
 
+	ClusterGroupManager() *ClusterGroupManager
+
 	ClientProvider
 }
 
 var _ Manager = &manager{}
 
 type manager struct {
-	clusters sync.Map
+	clusters           sync.Map
+	clusterGroupMgr    *ClusterGroupManager
+	clusterGroupMgrOnce sync.Once
 }
 
 func NewManager() Manager {
@@ -104,4 +109,11 @@ func (m *manager) DeleteAll() {
 		return true
 	})
 	m.clusters = sync.Map{}
+}
+
+func (m *manager) ClusterGroupManager() *ClusterGroupManager {
+	m.clusterGroupMgrOnce.Do(func() {
+		m.clusterGroupMgr = NewClusterGroupManager(context.Background(), m)
+	})
+	return m.clusterGroupMgr
 }

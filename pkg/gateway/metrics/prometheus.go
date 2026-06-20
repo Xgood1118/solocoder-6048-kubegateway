@@ -264,6 +264,62 @@ var (
 		[]string{"serverName", "verb", "resource", "user"},
 	)
 
+	proxyUpstreamWeight = compbasemetrics.NewGaugeVec(
+		&compbasemetrics.GaugeOpts{
+			Namespace:      namespace,
+			Subsystem:      subsystem,
+			Name:           "upstream_weight",
+			Help:           "Current weight of upstream endpoint.",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"pid", "serverName", "endpoint"},
+	)
+
+	proxyUpstreamRemoved = compbasemetrics.NewCounterVec(
+		&compbasemetrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      subsystem,
+			Name:           "upstream_removed_total",
+			Help:           "Number of times upstream endpoint was removed due to failures.",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"pid", "serverName", "endpoint", "reason"},
+	)
+
+	proxyUpstreamRecovered = compbasemetrics.NewCounterVec(
+		&compbasemetrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      subsystem,
+			Name:           "upstream_recovered_total",
+			Help:           "Number of times upstream endpoint recovered from removal.",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"pid", "serverName", "endpoint"},
+	)
+
+	proxyPriorityQueueWait = compbasemetrics.NewHistogramVec(
+		&compbasemetrics.HistogramOpts{
+			Namespace: namespace,
+			Subsystem: subsystem,
+			Name:      "priority_queue_wait_seconds",
+			Help:      "Wait time in priority queue before request is dispatched.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0},
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"pid", "serverName", "endpoint", "priority"},
+	)
+
+	proxyClusterGroupRouting = compbasemetrics.NewCounterVec(
+		&compbasemetrics.CounterOpts{
+			Namespace:      namespace,
+			Subsystem:      subsystem,
+			Name:           "cluster_group_routing_total",
+			Help:           "Number of requests routed through cluster group.",
+			StabilityLevel: compbasemetrics.ALPHA,
+		},
+		[]string{"pid", "serverName", "virtualEndpoint", "targetCluster"},
+	)
+
 	localMetrics = []compbasemetrics.Registerable{
 		proxyReceiveRequestCounter,
 		proxyRequestCounter,
@@ -284,6 +340,11 @@ var (
 		proxyUserRequestLoad,
 		proxyRequestUserLatencies,
 		proxyUserClientOverCostLatencies,
+		proxyUpstreamWeight,
+		proxyUpstreamRemoved,
+		proxyUpstreamRecovered,
+		proxyPriorityQueueWait,
+		proxyClusterGroupRouting,
 	}
 )
 
@@ -314,6 +375,12 @@ func Register() {
 		ProxyRequestTotalDataSizeObservers.AddObserver(&proxyRequestTotalDataSizeObserver{})
 		ProxyRequestDataSizeObservers.AddObserver(&proxyRequestDataSizeObserver{})
 		ProxyHandlingLatencyObservers.AddObserver(&proxyHandlingLatenciesObserver{})
+
+		ProxyUpstreamWeightObservers.AddObserver(&proxyUpstreamWeightObserver{})
+		ProxyUpstreamRemovedObservers.AddObserver(&proxyUpstreamRemovedObserver{})
+		ProxyUpstreamRecoveredObservers.AddObserver(&proxyUpstreamRecoveredObserver{})
+		ProxyPriorityQueueWaitObservers.AddObserver(&proxyPriorityQueueWaitObserver{})
+		ProxyClusterGroupRoutingObservers.AddObserver(&proxyClusterGroupRoutingObserver{})
 	})
 }
 
@@ -427,4 +494,34 @@ func (o *proxyHandlingLatenciesObserver) Observe(metric MetricInfo) {
 				Observe(metric.TraceLatencies[tracing.MetricStageClientOverCost].Seconds())
 		}
 	}
+}
+
+type proxyUpstreamWeightObserver struct{}
+
+func (o *proxyUpstreamWeightObserver) Observe(metric MetricInfo) {
+	proxyUpstreamWeight.WithLabelValues(proxyPid, metric.ServerName, metric.Endpoint).Set(metric.Weight)
+}
+
+type proxyUpstreamRemovedObserver struct{}
+
+func (o *proxyUpstreamRemovedObserver) Observe(metric MetricInfo) {
+	proxyUpstreamRemoved.WithLabelValues(proxyPid, metric.ServerName, metric.Endpoint, metric.Reason).Inc()
+}
+
+type proxyUpstreamRecoveredObserver struct{}
+
+func (o *proxyUpstreamRecoveredObserver) Observe(metric MetricInfo) {
+	proxyUpstreamRecovered.WithLabelValues(proxyPid, metric.ServerName, metric.Endpoint).Inc()
+}
+
+type proxyPriorityQueueWaitObserver struct{}
+
+func (o *proxyPriorityQueueWaitObserver) Observe(metric MetricInfo) {
+	proxyPriorityQueueWait.WithLabelValues(proxyPid, metric.ServerName, metric.Endpoint, metric.Priority).Observe(metric.WaitLatency)
+}
+
+type proxyClusterGroupRoutingObserver struct{}
+
+func (o *proxyClusterGroupRoutingObserver) Observe(metric MetricInfo) {
+	proxyClusterGroupRouting.WithLabelValues(proxyPid, metric.ServerName, metric.VirtualEndpoint, metric.TargetCluster).Inc()
 }

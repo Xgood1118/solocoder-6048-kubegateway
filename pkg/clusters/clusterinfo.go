@@ -76,10 +76,12 @@ func (s *endpointPickStrategy) Pop() (*EndpointInfo, error) {
 	for _, ep := range s.upstreams {
 		info, ok := s.cluster.Endpoints.Load(ep)
 		if ok {
-			if info.IsReady() {
+			if info.IsReady() && !s.cluster.IsEndpointRemoved(ep) {
 				readyEndpoints = append(readyEndpoints, info)
 			} else {
-				unreadyReason = append(unreadyReason, info.UnreadyReason())
+				if !info.IsReady() {
+					unreadyReason = append(unreadyReason, info.UnreadyReason())
+				}
 			}
 		}
 	}
@@ -91,13 +93,59 @@ func (s *endpointPickStrategy) Pop() (*EndpointInfo, error) {
 		return readyEndpoints[0], nil
 	}
 
-	// TODO: apply strategy
-	key := fmt.Sprintf("%v", readyEndpoints)
-	var i uint64
-	lb, _ := s.cluster.loadbalancer.LoadOrStore(key, &i)
-	index := atomic.AddUint64(lb.(*uint64), 1)
-	index = index % uint64(len(readyEndpoints))
-	return readyEndpoints[index], nil
+	switch s.strategy {
+	case proxyv1alpha1.WeightedRoundRobin:
+		return s.pickWeightedRoundRobin(readyEndpoints)
+	default:
+		key := fmt.Sprintf("%v", readyEndpoints)
+		var i uint64
+		lb, _ := s.cluster.loadbalancer.LoadOrStore(key, &i)
+		index := atomic.AddUint64(lb.(*uint64), 1)
+		index = index % uint64(len(readyEndpoints))
+		return readyEndpoints[index], nil
+	}
+}
+
+func (s *endpointPickStrategy) pickWeightedRoundRobin(readyEndpoints []*EndpointInfo) (*EndpointInfo, error) {
+	if s.cluster.adaptiveWeightManager == nil {
+		key := fmt.Sprintf("%v", readyEndpoints)
+		var i uint64
+		lb, _ := s.cluster.loadbalancer.LoadOrStore(key, &i)
+		index := atomic.AddUint64(lb.(*uint64), 1)
+		index = index % uint64(len(readyEndpoints))
+		return readyEndpoints[index], nil
+	}
+
+	totalWeight := int32(0)
+	endpointWeights := make([]int32, len(readyEndpoints))
+	for i, ep := range readyEndpoints {
+		weight := s.cluster.adaptiveWeightManager.GetWeight(ep.Endpoint)
+		if weight <= 0 {
+			weight = 1
+		}
+		endpointWeights[i] = weight
+		totalWeight += weight
+	}
+
+	if totalWeight <= 0 {
+		return readyEndpoints[0], nil
+	}
+
+	key := fmt.Sprintf("wrr-%v", readyEndpoints)
+	var current uint64
+	lb, _ := s.cluster.loadbalancer.LoadOrStore(key, &current)
+	counter := atomic.AddUint64(lb.(*uint64), 1)
+	pos := int32(counter % uint64(totalWeight))
+
+	accumulated := int32(0)
+	for i, weight := range endpointWeights {
+		accumulated += weight
+		if pos < accumulated {
+			return readyEndpoints[i], nil
+		}
+	}
+
+	return readyEndpoints[len(readyEndpoints)-1], nil
 }
 
 func (s *endpointPickStrategy) EnableLog() bool {
@@ -143,6 +191,9 @@ type ClusterInfo struct {
 	healthCheckInterval time.Duration
 	endpointHeathCheck  EndpointHealthCheck
 	skipSyncEndpoints   bool
+
+	adaptiveWeightManager *adaptiveWeightManager
+	priorityQueueManager  *PriorityQueueManager
 }
 
 type secureServingConfig struct {
@@ -327,6 +378,12 @@ func (c *ClusterInfo) Sync(cluster *proxyv1alpha1.UpstreamCluster) error {
 	c.currentDispatchPolicies.Store(cluster.Spec.DispatchPolicies)
 	c.currentLoggingConfig.Store(cluster.Spec.Logging)
 
+	// sync adaptive weight config
+	c.syncAdaptiveWeight(cluster)
+
+	// sync priority queue config
+	c.syncPriorityQueue(cluster)
+
 	return nil
 }
 
@@ -454,6 +511,108 @@ func (c *ClusterInfo) Stop() {
 	if c.cancel != nil {
 		c.cancel()
 	}
+	if c.adaptiveWeightManager != nil {
+		c.adaptiveWeightManager.Stop()
+	}
+	if c.priorityQueueManager != nil {
+		c.priorityQueueManager.Stop()
+	}
+}
+
+func (c *ClusterInfo) syncAdaptiveWeight(cluster *proxyv1alpha1.UpstreamCluster) {
+	config := cluster.Spec.AdaptiveWeight
+	if !config.Enabled {
+		if c.adaptiveWeightManager != nil {
+			c.adaptiveWeightManager.Stop()
+			c.adaptiveWeightManager = nil
+		}
+		return
+	}
+
+	baseWeights := make(map[string]int32)
+	for _, server := range cluster.Spec.Servers {
+		if server.Weight != nil && *server.Weight > 0 {
+			baseWeights[server.Endpoint] = *server.Weight
+		}
+	}
+
+	if c.adaptiveWeightManager == nil {
+		c.adaptiveWeightManager = newAdaptiveWeightManager(
+			c.ctx, c.Cluster, config, c.AllEndpoints(), baseWeights,
+		)
+		interval := time.Duration(config.AdjustIntervalSeconds) * time.Second
+		if interval <= 0 {
+			interval = 10 * time.Second
+		}
+		c.adaptiveWeightManager.Start(interval)
+	} else {
+		c.adaptiveWeightManager.UpdateConfig(config)
+	}
+}
+
+func (c *ClusterInfo) RecordEndpointLatency(endpoint string, latency time.Duration, success bool) {
+	if c.adaptiveWeightManager != nil {
+		c.adaptiveWeightManager.RecordLatency(endpoint, latency, success)
+	}
+}
+
+func (c *ClusterInfo) IsEndpointRemoved(endpoint string) bool {
+	if c.adaptiveWeightManager != nil {
+		return c.adaptiveWeightManager.IsRemoved(endpoint)
+	}
+	return false
+}
+
+func (c *ClusterInfo) GetEndpointWeight(endpoint string) int32 {
+	if c.adaptiveWeightManager != nil {
+		return c.adaptiveWeightManager.GetWeight(endpoint)
+	}
+	return 0
+}
+
+func (c *ClusterInfo) GetAllEndpointWeights() map[string]int32 {
+	if c.adaptiveWeightManager != nil {
+		return c.adaptiveWeightManager.GetAllWeights()
+	}
+	return make(map[string]int32)
+}
+
+func (c *ClusterInfo) syncPriorityQueue(cluster *proxyv1alpha1.UpstreamCluster) {
+	config := cluster.Spec.PriorityQueue
+	if !config.Enabled {
+		if c.priorityQueueManager != nil {
+			c.priorityQueueManager.Stop()
+			c.priorityQueueManager = nil
+		}
+		return
+	}
+
+	maxInflight := int32(100)
+	for _, schema := range cluster.Spec.FlowControl.Schemas {
+		if schema.MaxRequestsInflight != nil && schema.MaxRequestsInflight.Max > 0 {
+			maxInflight = schema.MaxRequestsInflight.Max
+			break
+		}
+	}
+
+	if c.priorityQueueManager == nil {
+		c.priorityQueueManager = NewPriorityQueueManager(
+			c.ctx, c.Cluster, config, maxInflight,
+		)
+	} else {
+		c.priorityQueueManager.UpdateConfig(config, maxInflight)
+	}
+}
+
+func (c *ClusterInfo) PriorityQueueManager() *PriorityQueueManager {
+	return c.priorityQueueManager
+}
+
+func (c *ClusterInfo) GetRequestPriority(verb, apiGroup, resource string) int32 {
+	if c.priorityQueueManager == nil {
+		return 0
+	}
+	return c.priorityQueueManager.GetPriority(verb, apiGroup, resource)
 }
 
 // MatchAttributes matches a requestAttributes from reqeust and return a flowcontrol and endpointPicker

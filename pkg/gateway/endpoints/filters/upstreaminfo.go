@@ -16,13 +16,16 @@ package filters
 
 import (
 	"fmt"
+	"net"
+	"net/http"
+
 	"github.com/kubewharf/kubegateway/pkg/clusters"
 	"github.com/kubewharf/kubegateway/pkg/clusters/features"
 	"github.com/kubewharf/kubegateway/pkg/gateway/endpoints/response"
+	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
-	"net"
-	"net/http"
 
 	"github.com/kubewharf/kubegateway/pkg/gateway/endpoints/request"
 )
@@ -38,19 +41,49 @@ func WithUpstreamInfo(handler http.Handler, clusterManager clusters.Manager, s r
 			return
 		}
 
+		requestInfo, _ := apirequest.RequestInfoFrom(ctx)
+
 		if ip := net.ParseIP(info.Hostname); ip == nil {
 			info.IsProxyRequest = true
 			cluster, ok := clusterManager.Get(info.Hostname)
 			if !ok {
-				response.TerminateWithError(s,
-					errors.NewServiceUnavailable(fmt.Sprintf("the request cluster(%s) is not being proxied", info.Hostname)),
-					response.TerminationReasonClusterNotBeingProxied, w, req)
-				return
+				groupMgr := clusterManager.ClusterGroupManager()
+				group, groupOk := groupMgr.GetGroupByVirtualEndpoint(info.Hostname)
+				if groupOk {
+					namespace := ""
+					if requestInfo != nil {
+						namespace = requestInfo.Namespace
+					}
+					targetCluster, targetName, err := groupMgr.SelectTargetCluster(group, namespace)
+					if err != nil {
+						response.TerminateWithError(s,
+							errors.NewServiceUnavailable(fmt.Sprintf("no available cluster in group %q: %v", group.GroupName, err)),
+							response.TerminationReasonClusterNotBeingProxied, w, req)
+						return
+					}
+					cluster = targetCluster
+					info.UpstreamCluster = cluster
+					info.VirtualEndpoint = info.Hostname
+					info.TargetCluster = targetName
+
+					w.Header().Set("X-KubeGateway-Target-Cluster", targetName)
+					w.Header().Set("X-KubeGateway-Group", group.GroupName)
+					if len(namespace) > 0 {
+						w.Header().Set("X-KubeGateway-Namespace", namespace)
+					}
+
+					groupMgr.RecordRouting(info.Hostname, targetName)
+				} else {
+					response.TerminateWithError(s,
+						errors.NewServiceUnavailable(fmt.Sprintf("the request cluster(%s) is not being proxied", info.Hostname)),
+						response.TerminationReasonClusterNotBeingProxied, w, req)
+					return
+				}
+			} else {
+				info.UpstreamCluster = cluster
 			}
-			info.UpstreamCluster = cluster
 
 			if cluster.FeatureEnabled(features.CloseConnectionWhenIdle) {
-				// Send a GOAWAY and tear down the TCP connection when idle.
 				w.Header().Set("Connection", "close")
 			}
 

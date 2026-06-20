@@ -67,13 +67,16 @@ func (f *ExtraRequestInfoFactory) NewExtraRequestInfo(req *http.Request) (*Extra
 
 type ExtraRequestInfo struct {
 	Scheme               string
-	Hostname             string // hostname without port
+	Hostname             string
 	IsImpersonateRequest bool
 	Impersonator         user.Info
 	UpstreamCluster      *clusters.ClusterInfo
 	ReaderWriter         RequestReaderWriterWrapper
 	IsProxyRequest       bool
 	IsLongRunningRequest bool
+
+	VirtualEndpoint string
+	TargetCluster   string
 }
 
 // WithExtraRequestInfo returns a copy of parent in which the ExtraRequestInfo value is set

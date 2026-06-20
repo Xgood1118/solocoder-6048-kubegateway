@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	apimachineryvalidation "k8s.io/apimachinery/pkg/api/validation"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	certutil "k8s.io/client-go/util/cert"
@@ -54,6 +55,11 @@ func ValidateUpstreamClusterSpec(spec *proxyv1alpha1.UpstreamClusterSpec, fldPat
 	for i, policy := range spec.DispatchPolicies {
 		allErrs = append(allErrs, ValidateDispatchPolicy(upstreams, flowControlSchemaNames, policy, fldPath.Child("dispatchPolicies").Index(i))...)
 	}
+
+	allErrs = append(allErrs, ValidateAdaptiveWeightConfig(&spec.AdaptiveWeight, fldPath.Child("adaptiveWeight"))...)
+	allErrs = append(allErrs, ValidatePriorityQueueConfig(&spec.PriorityQueue, fldPath.Child("priorityQueue"))...)
+	allErrs = append(allErrs, ValidateClusterGroupConfig(&spec.ClusterGroup, fldPath.Child("clusterGroup"))...)
+
 	return allErrs
 }
 
@@ -340,6 +346,109 @@ func validateTokenBucketFlowControlSchema(tokenBucket *proxyv1alpha1.TokenBucket
 
 	if tokenBucket.Burst < tokenBucket.QPS {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("burst"), tokenBucket.Burst, "must bigger than qps"))
+	}
+	return allErrs
+}
+
+func ValidateAdaptiveWeightConfig(config *proxyv1alpha1.AdaptiveWeightConfig, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if !config.Enabled {
+		return allErrs
+	}
+
+	if config.WindowSize < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("windowSize"), config.WindowSize, "must be greater than or equal to 0"))
+	}
+	if config.WindowSize > 0 && config.WindowSize < 10 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("windowSize"), config.WindowSize, "must be at least 10 for meaningful P99 calculation"))
+	}
+	if config.MinWeight < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("minWeight"), config.MinWeight, "must be greater than or equal to 0"))
+	}
+	if config.MaxWeight < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("maxWeight"), config.MaxWeight, "must be greater than or equal to 0"))
+	}
+	if config.MinWeight > 0 && config.MaxWeight > 0 && config.MinWeight > config.MaxWeight {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("minWeight"), config.MinWeight, "must be less than or equal to maxWeight"))
+	}
+	if config.AdjustIntervalSeconds < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("adjustIntervalSeconds"), config.AdjustIntervalSeconds, "must be greater than or equal to 0"))
+	}
+	if config.FailureThreshold < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("failureThreshold"), config.FailureThreshold, "must be greater than or equal to 0"))
+	}
+	if config.BaseBackoffSeconds < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("baseBackoffSeconds"), config.BaseBackoffSeconds, "must be greater than or equal to 0"))
+	}
+	if config.MaxBackoffSeconds < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("maxBackoffSeconds"), config.MaxBackoffSeconds, "must be greater than or equal to 0"))
+	}
+	if config.BaseBackoffSeconds > 0 && config.MaxBackoffSeconds > 0 && config.BaseBackoffSeconds > config.MaxBackoffSeconds {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("baseBackoffSeconds"), config.BaseBackoffSeconds, "must be less than or equal to maxBackoffSeconds"))
+	}
+	return allErrs
+}
+
+func ValidatePriorityQueueConfig(config *proxyv1alpha1.PriorityQueueConfig, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if !config.Enabled {
+		return allErrs
+	}
+
+	if config.MaxQueueSize < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("maxQueueSize"), config.MaxQueueSize, "must be greater than or equal to 0"))
+	}
+	if config.MaxWaitSeconds < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("maxWaitSeconds"), config.MaxWaitSeconds, "must be greater than or equal to 0"))
+	}
+	if config.DefaultPriority < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("defaultPriority"), config.DefaultPriority, "must be greater than or equal to 0"))
+	}
+	if config.DegradedPriorityThreshold < 0 {
+		allErrs = append(allErrs, field.Invalid(fldPath.Child("degradedPriorityThreshold"), config.DegradedPriorityThreshold, "must be greater than or equal to 0"))
+	}
+
+	verbs := sets.NewString("get", "list", "create", "update", "delete", "deletecollection", "patch", "watch", "proxy", "*")
+	for i, rule := range config.PriorityRules {
+		rulePath := fldPath.Child("priorityRules").Index(i)
+		if rule.Priority < 0 {
+			allErrs = append(allErrs, field.Invalid(rulePath.Child("priority"), rule.Priority, "must be greater than or equal to 0"))
+		}
+		for j, verb := range rule.Verbs {
+			if !verbs.Has(strings.ToLower(verb)) {
+				allErrs = append(allErrs, field.Invalid(rulePath.Child("verbs").Index(j), verb, "must be a valid verb or '*'"))
+			}
+		}
+	}
+	return allErrs
+}
+
+func ValidateClusterGroupConfig(config *proxyv1alpha1.ClusterGroupConfig, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	if !config.Enabled {
+		return allErrs
+	}
+
+	if len(config.GroupName) == 0 {
+		allErrs = append(allErrs, field.Required(fldPath.Child("groupName"), "groupName is required when clusterGroup is enabled"))
+	}
+	if len(config.VirtualEndpoint) == 0 {
+		allErrs = append(allErrs, field.Required(fldPath.Child("virtualEndpoint"), "virtualEndpoint is required when clusterGroup is enabled"))
+	}
+	if len(config.LabelSelector) > 0 {
+		if _, err := labels.Parse(config.LabelSelector); err != nil {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("labelSelector"), config.LabelSelector, "invalid label selector: "+err.Error()))
+		}
+	}
+	backupSet := sets.NewString()
+	for i, backup := range config.BackupClusters {
+		if backupSet.Has(backup) {
+			allErrs = append(allErrs, field.Duplicate(fldPath.Child("backupClusters").Index(i), backup))
+		}
+		backupSet.Insert(backup)
+		if len(config.PrimaryCluster) > 0 && backup == config.PrimaryCluster {
+			allErrs = append(allErrs, field.Invalid(fldPath.Child("backupClusters").Index(i), backup, "backup cluster must not be the same as primaryCluster"))
+		}
 	}
 	return allErrs
 }

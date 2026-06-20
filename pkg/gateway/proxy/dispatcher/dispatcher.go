@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gobeam/stringy"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -31,6 +32,7 @@ import (
 	"github.com/kubewharf/kubegateway/pkg/clusters"
 	"github.com/kubewharf/kubegateway/pkg/gateway/endpoints/request"
 	"github.com/kubewharf/kubegateway/pkg/gateway/endpoints/response"
+	"github.com/kubewharf/kubegateway/pkg/gateway/metrics"
 	"github.com/kubewharf/kubegateway/pkg/util/tracing"
 )
 
@@ -101,6 +103,50 @@ func (d *dispatcher) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	defer flowcontrol.Release()
 
+	priorityQueue := cluster.PriorityQueueManager()
+	var waitDuration time.Duration
+	if priorityQueue != nil {
+		priority := cluster.GetRequestPriority(
+			requestAttributes.GetVerb(),
+			requestAttributes.GetAPIGroup(),
+			requestAttributes.GetResource(),
+		)
+
+		maxWait := 30 * time.Second
+
+		acquired, waitDur, err := priorityQueue.TryAcquire(priority, maxWait)
+		waitDuration = waitDur
+
+		w.Header().Set("X-KubeGateway-Queue-Wait", fmt.Sprintf("%.3fms", float64(waitDuration.Microseconds())/1000.0))
+		w.Header().Set("X-KubeGateway-Priority", fmt.Sprintf("%d", priority))
+
+		if waitDuration > 0 {
+			metrics.RecordPriorityQueueWait(extraInfo.Hostname, "", fmt.Sprintf("%d", priority), waitDuration)
+		}
+
+		if !acquired {
+			if priorityQueue.ShouldDegrade(priority) && priorityQueue.IsOverloaded() {
+				cacheKey := fmt.Sprintf("%s:%s:%s", requestAttributes.GetVerb(), requestAttributes.GetAPIGroup(), requestAttributes.GetResource())
+				if data, contentType, ok := priorityQueue.GetCachedResponse(cacheKey); ok {
+					w.Header().Set("Content-Type", contentType)
+					w.Header().Set("X-KubeGateway-Degraded", "true")
+					w.WriteHeader(http.StatusOK)
+					w.Write(data)
+					return
+				}
+			}
+			if err != nil {
+				if errStatus, ok := err.(*errors.StatusError); ok {
+					d.responseError(errStatus, w, req, statusReasonRateLimited)
+				} else {
+					d.responseError(errors.NewServiceUnavailable(err.Error()), w, req, statusReasonNoReadyEndpoints)
+				}
+			}
+			return
+		}
+		defer priorityQueue.Release()
+	}
+
 	endpoint, err := endpointPicker.Pop()
 	if err != nil {
 		d.responseError(errors.NewServiceUnavailable(err.Error()), w, req, statusReasonNoReadyEndpoints)
@@ -145,7 +191,22 @@ func (d *dispatcher) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	logging := d.enableAccessLog && endpointPicker.EnableLog()
 	monitor := requestMonitor(req, w, logging, requestInfo, extraInfo, endpoint.Endpoint, user, extraInfo.Impersonator, endpointPicker.FlowControlName())
 	monitor.MonitorBeforeProxy()
-	defer monitor.MonitorAfterProxy()
+	startTime := time.Now()
+
+	defer func() {
+		monitor.MonitorAfterProxy()
+		elapsed := time.Since(startTime)
+		success := true
+		if extraInfo.ReaderWriter != nil {
+			status := extraInfo.ReaderWriter.Status()
+			if status >= 500 || status == 0 {
+				success = false
+			}
+		}
+		if cluster != nil {
+			cluster.RecordEndpointLatency(endpoint.Endpoint, elapsed, success)
+		}
+	}()
 
 	responder := newErrorResponder(d.codecs, endpoint, requestInfo, extraInfo.ReaderWriter)
 

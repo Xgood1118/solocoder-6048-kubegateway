@@ -320,6 +320,46 @@ func RecordProxyTraceLatency(traceLatencies map[string]time.Duration, serverName
 	ProxyHandlingLatencyObservers.Observe(metric)
 }
 
+func RecordUpstreamWeight(serverName, endpoint string, weight float64) {
+	ProxyUpstreamWeightObservers.Observe(MetricInfo{
+		ServerName: serverName,
+		Endpoint:   endpoint,
+		Weight:     weight,
+	})
+}
+
+func RecordUpstreamRemoved(serverName, endpoint, reason string) {
+	ProxyUpstreamRemovedObservers.Observe(MetricInfo{
+		ServerName: serverName,
+		Endpoint:   endpoint,
+		Reason:     reason,
+	})
+}
+
+func RecordUpstreamRecovered(serverName, endpoint string) {
+	ProxyUpstreamRecoveredObservers.Observe(MetricInfo{
+		ServerName: serverName,
+		Endpoint:   endpoint,
+	})
+}
+
+func RecordPriorityQueueWait(serverName, endpoint, priority string, waitDuration time.Duration) {
+	ProxyPriorityQueueWaitObservers.Observe(MetricInfo{
+		ServerName:  serverName,
+		Endpoint:    endpoint,
+		Priority:    priority,
+		WaitLatency: waitDuration.Seconds(),
+	})
+}
+
+func RecordClusterGroupRouting(serverName, virtualEndpoint, targetCluster string) {
+	ProxyClusterGroupRoutingObservers.Observe(MetricInfo{
+		ServerName:      serverName,
+		VirtualEndpoint: virtualEndpoint,
+		TargetCluster:   targetCluster,
+	})
+}
+
 func cleanUserForMetric(user user.Info) string {
 	if user == nil {
 		return "anonymous"
